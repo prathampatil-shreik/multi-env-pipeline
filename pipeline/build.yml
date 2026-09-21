@@ -1,0 +1,16 @@
+# Build Stage
+
+Describes the build and test stage of the pipeline.
+
+## Steps
+
+1. Checkout source code
+2. Set up Java 17
+3. Run `mvn clean package` (builds JAR and runs tests)
+4. Build Docker image
+5. Push Docker image to Amazon ECR with Git SHA as tag
+
+## Image Tag Strategy
+
+The image is tagged with the Git commit SHA (`github.sha`).
+This same tag is used across Dev, Staging, and Production — no rebuild occurs.

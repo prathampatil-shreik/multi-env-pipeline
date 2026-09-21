@@ -1,0 +1,15 @@
+# Deploy – Production Stage
+
+## Trigger
+Runs after a successful Staging deployment and smoke test.
+Requires manual approval via GitHub Environment protection rules.
+
+## Steps
+1. Update ECS service (Production cluster) with the same image tag from Staging
+2. Wait for service to stabilize
+3. Verify: `GET /health` must return HTTP 200
+
+## Environment Variables (injected via ECS task definition)
+- APP_ENV=PRODUCTION
+- APP_VERSION=${GIT_SHA}
+- APP_MESSAGE=Welcome to Production

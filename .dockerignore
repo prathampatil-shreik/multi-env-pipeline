@@ -1,0 +1,5 @@
+# Exclude everything by default
+**
+
+# Only allow what Docker needs
+!target/taskflow-0.0.1-SNAPSHOT.jar

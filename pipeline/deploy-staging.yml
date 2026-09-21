@@ -1,0 +1,14 @@
+# Deploy – Staging Stage
+
+## Trigger
+Runs automatically after a successful Dev deployment and smoke test.
+
+## Steps
+1. Update ECS service (Staging cluster) with the same image tag from Dev
+2. Wait for service to stabilize
+3. Smoke test: `GET /health` must return HTTP 200
+
+## Environment Variables (injected via ECS task definition)
+- APP_ENV=STAGING
+- APP_VERSION=${GIT_SHA}
+- APP_MESSAGE=Welcome to Staging
