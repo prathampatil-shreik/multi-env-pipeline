@@ -110,7 +110,7 @@ jobs:
       - name: Debug Dev ECS service
         run: |
           echo "AWS Region:"
-          aws configure get region
+          echo "$AWS_DEFAULT_REGION"
 
           echo "ECS Cluster:"
           aws ecs describe-clusters \
