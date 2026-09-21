@@ -1,12 +1,10 @@
 name: TaskFlow Multi-Environment Pipeline
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ap-south-1
   ECR_REPOSITORY: taskflow
   ECS_CLUSTER: taskflow-cluster
   CONTAINER_NAME: taskflow
