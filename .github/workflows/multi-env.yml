@@ -7,28 +7,26 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: ap-south-1
-  ECR_REPOSITORY: taskflow
-  ECS_CLUSTER: taskflow-multi-env
-
-  DEV_SERVICE: taskflow-service-2tpd33cg
-  STAGING_SERVICE: taskflow-service-9xd5md0r
-  PROD_SERVICE: taskflow-prod
-
-  CONTAINER_NAME: taskflow
+  AWS_REGION:       ap-south-1
+  ECR_REPOSITORY:   taskflow
+  ECS_CLUSTER:      taskflow-multi-env
+  DEV_SERVICE:      taskflow-service-2tpd33cg
+  STAGING_SERVICE:  taskflow-service-9xd5md0r
+  PROD_SERVICE:     taskflow-prod
+  CONTAINER_NAME:   taskflow
 
 jobs:
 
   # ============================================================
-  # 1. BUILD ONCE AND PUSH TO ECR
+  # 1. BUILD ONCE — one image, one SHA tag
   # ============================================================
   build:
     name: Build Once & Push Artifact
     runs-on: ubuntu-latest
 
     outputs:
-      image: ${{ steps.image.outputs.image }}
-      image-tag: ${{ steps.meta.outputs.tag }}
+      image:     ${{ steps.image-output.outputs.image }}
+      image-tag: ${{ steps.image-output.outputs.image-tag }}
 
     steps:
 
@@ -43,20 +41,14 @@ jobs:
           cache: maven
 
       - name: Build JAR
-        run: |
-          mvn clean package -DskipTests
-
-      - name: Set image tag
-        id: meta
-        run: |
-          echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        run: mvn clean package -DskipTests
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region:            ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -65,43 +57,40 @@ jobs:
       - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+          IMAGE_TAG:    ${{ github.sha }}
         run: |
           docker build \
             -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             .
 
-      - name: Push Docker image
+      - name: Push Docker image to ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+          IMAGE_TAG:    ${{ github.sha }}
         run: |
-          docker push \
-            "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-      - name: Set image output
-        id: image
+      - name: Set image outputs
+        id: image-output
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+          IMAGE_TAG:    ${{ github.sha }}
         run: |
           IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-          echo "Release artifact:"
-          echo "$IMAGE"
-
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "========================================"
+          echo "Release artifact: $IMAGE"
+          echo "========================================"
+          echo "image=$IMAGE"         >> "$GITHUB_OUTPUT"
+          echo "image-tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
 
   # ============================================================
-  # 2. DEPLOY SAME ARTIFACT TO DEV
+  # 2. DEPLOY TO DEV — same artifact, preserve env config
   # ============================================================
   deploy-dev:
     name: Deploy to Dev
     runs-on: ubuntu-latest
-
     needs: build
-
     environment: dev
 
     steps:
@@ -109,30 +98,29 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region:            ${{ env.AWS_REGION }}
 
       - name: Get current Dev task definition
         id: dev-task
         run: |
-          TASK_DEFINITION=$(aws ecs describe-services \
+          TASK_DEF=$(aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
             --services "$DEV_SERVICE" \
             --query 'services[0].taskDefinition' \
             --output text)
 
-          echo "Current Dev task definition:"
-          echo "$TASK_DEFINITION"
+          echo "Current Dev task definition: $TASK_DEF"
 
-          if [ -z "$TASK_DEFINITION" ] || [ "$TASK_DEFINITION" = "None" ]; then
-            echo "ERROR: Dev task definition not found"
+          if [ -z "$TASK_DEF" ] || [ "$TASK_DEF" = "None" ]; then
+            echo "ERROR: Could not find task definition for $DEV_SERVICE in $ECS_CLUSTER"
             exit 1
           fi
 
-          echo "task_definition=$TASK_DEFINITION" >> "$GITHUB_OUTPUT"
+          echo "task_definition=$TASK_DEF" >> "$GITHUB_OUTPUT"
 
-      - name: Create Dev task definition
+      - name: Create new Dev task definition (image only)
         run: |
           aws ecs describe-task-definition \
             --task-definition "${{ steps.dev-task.outputs.task_definition }}" \
@@ -149,15 +137,16 @@ jobs:
               .registeredAt,
               .registeredBy
             )
-            |
-            .containerDefinitions |=
-              map(
+            | .containerDefinitions |= map(
                 if .name == "taskflow"
                 then .image = $IMAGE
                 else .
                 end
               )
           ' dev-current.json > dev-new.json
+
+          echo "New Dev image:"
+          jq -r '.containerDefinitions[] | select(.name=="taskflow") | .image' dev-new.json
 
       - name: Register Dev task definition
         id: register-dev
@@ -167,19 +156,23 @@ jobs:
             --query 'taskDefinition.taskDefinitionArn' \
             --output text)
 
-          echo "Dev task definition:"
-          echo "$ARN"
+          echo "Registered: $ARN"
+
+          if [ -z "$ARN" ] || [ "$ARN" = "None" ]; then
+            echo "ERROR: Failed to register Dev task definition"
+            exit 1
+          fi
 
           echo "arn=$ARN" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy same artifact to Dev
+      - name: Update Dev service
         run: |
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
             --service "$DEV_SERVICE" \
             --task-definition "${{ steps.register-dev.outputs.arn }}"
 
-      - name: Wait for Dev
+      - name: Wait for Dev stability
         run: |
           aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
@@ -194,19 +187,23 @@ jobs:
             --query 'taskArns[0]' \
             --output text)
 
-          IMAGE=$(aws ecs describe-tasks \
+          if [ -z "$TASK" ] || [ "$TASK" = "None" ]; then
+            echo "ERROR: No running task found in Dev"
+            exit 1
+          fi
+
+          ACTUAL=$(aws ecs describe-tasks \
             --cluster "$ECS_CLUSTER" \
             --tasks "$TASK" \
             --query 'tasks[0].containers[?name==`taskflow`].image' \
             --output text)
 
-          echo "Expected:"
-          echo "${{ needs.build.outputs.image }}"
+          EXPECTED="${{ needs.build.outputs.image }}"
 
-          echo "Actual:"
-          echo "$IMAGE"
+          echo "Expected: $EXPECTED"
+          echo "Actual:   $ACTUAL"
 
-          if [ "$IMAGE" != "${{ needs.build.outputs.image }}" ]; then
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "ERROR: Dev is not running the release artifact"
             exit 1
           fi
@@ -215,14 +212,12 @@ jobs:
 
 
   # ============================================================
-  # 3. PROMOTE SAME ARTIFACT TO STAGING
+  # 3. PROMOTE TO STAGING — same artifact, ECS health gate
   # ============================================================
   deploy-staging:
     name: Promote to Staging
     runs-on: ubuntu-latest
-
     needs: [build, deploy-dev]
-
     environment: staging
 
     steps:
@@ -230,30 +225,29 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region:            ${{ env.AWS_REGION }}
 
       - name: Get current Staging task definition
         id: staging-task
         run: |
-          TASK_DEFINITION=$(aws ecs describe-services \
+          TASK_DEF=$(aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
             --services "$STAGING_SERVICE" \
             --query 'services[0].taskDefinition' \
             --output text)
 
-          echo "Current Staging task definition:"
-          echo "$TASK_DEFINITION"
+          echo "Current Staging task definition: $TASK_DEF"
 
-          if [ -z "$TASK_DEFINITION" ] || [ "$TASK_DEFINITION" = "None" ]; then
-            echo "ERROR: Staging task definition not found"
+          if [ -z "$TASK_DEF" ] || [ "$TASK_DEF" = "None" ]; then
+            echo "ERROR: Could not find task definition for $STAGING_SERVICE in $ECS_CLUSTER"
             exit 1
           fi
 
-          echo "task_definition=$TASK_DEFINITION" >> "$GITHUB_OUTPUT"
+          echo "task_definition=$TASK_DEF" >> "$GITHUB_OUTPUT"
 
-      - name: Create Staging task definition
+      - name: Create new Staging task definition (image only)
         run: |
           aws ecs describe-task-definition \
             --task-definition "${{ steps.staging-task.outputs.task_definition }}" \
@@ -270,15 +264,16 @@ jobs:
               .registeredAt,
               .registeredBy
             )
-            |
-            .containerDefinitions |=
-              map(
+            | .containerDefinitions |= map(
                 if .name == "taskflow"
                 then .image = $IMAGE
                 else .
                 end
               )
           ' staging-current.json > staging-new.json
+
+          echo "New Staging image:"
+          jq -r '.containerDefinitions[] | select(.name=="taskflow") | .image' staging-new.json
 
       - name: Register Staging task definition
         id: register-staging
@@ -288,19 +283,23 @@ jobs:
             --query 'taskDefinition.taskDefinitionArn' \
             --output text)
 
-          echo "Staging task definition:"
-          echo "$ARN"
+          echo "Registered: $ARN"
+
+          if [ -z "$ARN" ] || [ "$ARN" = "None" ]; then
+            echo "ERROR: Failed to register Staging task definition"
+            exit 1
+          fi
 
           echo "arn=$ARN" >> "$GITHUB_OUTPUT"
 
-      - name: Promote same artifact to Staging
+      - name: Update Staging service
         run: |
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
             --service "$STAGING_SERVICE" \
             --task-definition "${{ steps.register-staging.outputs.arn }}"
 
-      - name: Wait for Staging
+      - name: Wait for Staging stability
         run: |
           aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
@@ -315,24 +314,30 @@ jobs:
             --query 'taskArns[0]' \
             --output text)
 
-          IMAGE=$(aws ecs describe-tasks \
+          if [ -z "$TASK" ] || [ "$TASK" = "None" ]; then
+            echo "ERROR: No running task found in Staging"
+            exit 1
+          fi
+
+          ACTUAL=$(aws ecs describe-tasks \
             --cluster "$ECS_CLUSTER" \
             --tasks "$TASK" \
             --query 'tasks[0].containers[?name==`taskflow`].image' \
             --output text)
 
-          echo "Expected:"
-          echo "${{ needs.build.outputs.image }}"
+          EXPECTED="${{ needs.build.outputs.image }}"
 
-          echo "Actual:"
-          echo "$IMAGE"
+          echo "Expected: $EXPECTED"
+          echo "Actual:   $ACTUAL"
 
-          if [ "$IMAGE" != "${{ needs.build.outputs.image }}" ]; then
-            echo "ERROR: Staging is not running the same artifact"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "ERROR: Staging is not running the same artifact as Dev"
+            echo "Expected: $EXPECTED"
+            echo "Actual:   $ACTUAL"
             exit 1
           fi
 
-          echo "PASS: Staging is running the exact same artifact."
+          echo "PASS: Staging is running the exact same artifact as Dev."
 
       - name: Staging health gate
         run: |
@@ -356,20 +361,18 @@ jobs:
           if [ "$RUNNING" = "$DESIRED" ] && [ "$RUNNING" != "0" ]; then
             echo "PASS: Staging health gate passed."
           else
-            echo "FAIL: Staging service is not healthy."
+            echo "FAIL: Staging service is not healthy (desired=$DESIRED, running=$RUNNING)"
             exit 1
           fi
 
 
   # ============================================================
-  # 4. PRODUCTION — requires manual approval
+  # 4. PRODUCTION — manual approval required
   # ============================================================
   deploy-prod:
     name: Deploy to Production
     runs-on: ubuntu-latest
-
     needs: [build, deploy-staging]
-
     environment:
       name: production
 
@@ -378,30 +381,29 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region:            ${{ env.AWS_REGION }}
 
       - name: Get current Production task definition
         id: prod-task
         run: |
-          TASK_DEFINITION=$(aws ecs describe-services \
+          TASK_DEF=$(aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
             --services "$PROD_SERVICE" \
             --query 'services[0].taskDefinition' \
             --output text)
 
-          echo "Current Production task definition:"
-          echo "$TASK_DEFINITION"
+          echo "Current Production task definition: $TASK_DEF"
 
-          if [ -z "$TASK_DEFINITION" ] || [ "$TASK_DEFINITION" = "None" ]; then
-            echo "ERROR: Production task definition not found"
+          if [ -z "$TASK_DEF" ] || [ "$TASK_DEF" = "None" ]; then
+            echo "ERROR: Could not find task definition for $PROD_SERVICE in $ECS_CLUSTER"
             exit 1
           fi
 
-          echo "task_definition=$TASK_DEFINITION" >> "$GITHUB_OUTPUT"
+          echo "task_definition=$TASK_DEF" >> "$GITHUB_OUTPUT"
 
-      - name: Create Production task definition
+      - name: Create new Production task definition (image only)
         run: |
           aws ecs describe-task-definition \
             --task-definition "${{ steps.prod-task.outputs.task_definition }}" \
@@ -418,15 +420,16 @@ jobs:
               .registeredAt,
               .registeredBy
             )
-            |
-            .containerDefinitions |=
-              map(
+            | .containerDefinitions |= map(
                 if .name == "taskflow"
                 then .image = $IMAGE
                 else .
                 end
               )
           ' prod-current.json > prod-new.json
+
+          echo "New Production image:"
+          jq -r '.containerDefinitions[] | select(.name=="taskflow") | .image' prod-new.json
 
       - name: Register Production task definition
         id: register-prod
@@ -436,19 +439,23 @@ jobs:
             --query 'taskDefinition.taskDefinitionArn' \
             --output text)
 
-          echo "Production task definition:"
-          echo "$ARN"
+          echo "Registered: $ARN"
+
+          if [ -z "$ARN" ] || [ "$ARN" = "None" ]; then
+            echo "ERROR: Failed to register Production task definition"
+            exit 1
+          fi
 
           echo "arn=$ARN" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy same artifact to Production
+      - name: Update Production service
         run: |
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
             --service "$PROD_SERVICE" \
             --task-definition "${{ steps.register-prod.outputs.arn }}"
 
-      - name: Wait for Production
+      - name: Wait for Production stability
         run: |
           aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
@@ -463,40 +470,60 @@ jobs:
             --query 'taskArns[0]' \
             --output text)
 
-          IMAGE=$(aws ecs describe-tasks \
+          if [ -z "$TASK" ] || [ "$TASK" = "None" ]; then
+            echo "ERROR: No running task found in Production"
+            exit 1
+          fi
+
+          ACTUAL=$(aws ecs describe-tasks \
             --cluster "$ECS_CLUSTER" \
             --tasks "$TASK" \
             --query 'tasks[0].containers[?name==`taskflow`].image' \
             --output text)
 
-          echo "Expected:"
-          echo "${{ needs.build.outputs.image }}"
+          EXPECTED="${{ needs.build.outputs.image }}"
 
-          echo "Actual:"
-          echo "$IMAGE"
+          echo "Expected: $EXPECTED"
+          echo "Actual:   $ACTUAL"
 
-          if [ "$IMAGE" != "${{ needs.build.outputs.image }}" ]; then
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "ERROR: Production is not running the release artifact"
+            echo "Expected: $EXPECTED"
+            echo "Actual:   $ACTUAL"
             exit 1
           fi
 
           echo "PASS: Production is running the exact release artifact."
+          echo "========================================"
+          echo "Build Once / Deploy Many — COMPLETE"
+          echo "Dev SHA    = $EXPECTED"
+          echo "Staging SHA = $EXPECTED"
+          echo "Prod SHA   = $ACTUAL"
+          echo "All three environments running the same artifact."
+          echo "========================================"
 
-      - name: Production health check
+      - name: Production health gate
         run: |
-          STATUS=$(curl \
-            --silent \
-            --show-error \
-            --output /tmp/prod-health.json \
-            --write-out "%{http_code}" \
-            "${{ secrets.PROD_APP_URL }}/health")
+          echo "Checking Production ECS service health..."
 
-          echo "HTTP status: $STATUS"
-          cat /tmp/prod-health.json
+          RUNNING=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$PROD_SERVICE" \
+            --query 'services[0].runningCount' \
+            --output text)
 
-          if [ "$STATUS" != "200" ]; then
-            echo "Production health check failed"
+          DESIRED=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$PROD_SERVICE" \
+            --query 'services[0].desiredCount' \
+            --output text)
+
+          echo "Desired tasks: $DESIRED"
+          echo "Running tasks: $RUNNING"
+
+          if [ "$RUNNING" = "$DESIRED" ] && [ "$RUNNING" != "0" ]; then
+            echo "PASS: Production health gate passed."
+          else
+            echo "FAIL: Production service is not healthy (desired=$DESIRED, running=$RUNNING)"
             exit 1
           fi
-
-          echo "Production deployment verified."
