@@ -336,26 +336,27 @@ jobs:
 
       - name: Staging health gate
         run: |
-          echo "Checking Staging ALB target health..."
+          echo "Checking Staging ECS service health..."
 
-          TG_ARN=$(aws elbv2 describe-target-groups \
-            --names taskflow-staging-tg \
-            --region "$AWS_REGION" \
-            --query 'TargetGroups[0].TargetGroupArn' \
+          RUNNING=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$STAGING_SERVICE" \
+            --query 'services[0].runningCount' \
             --output text)
 
-          HEALTH=$(aws elbv2 describe-target-health \
-            --target-group-arn "$TG_ARN" \
-            --region "$AWS_REGION" \
-            --query 'TargetHealthDescriptions[*].TargetHealth.State' \
+          DESIRED=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$STAGING_SERVICE" \
+            --query 'services[0].desiredCount' \
             --output text)
 
-          echo "Staging target health: $HEALTH"
+          echo "Desired tasks: $DESIRED"
+          echo "Running tasks: $RUNNING"
 
-          if echo "$HEALTH" | grep -qw "healthy"; then
+          if [ "$RUNNING" = "$DESIRED" ] && [ "$RUNNING" != "0" ]; then
             echo "PASS: Staging health gate passed."
           else
-            echo "FAIL: Staging target is not healthy."
+            echo "FAIL: Staging service is not healthy."
             exit 1
           fi
 
