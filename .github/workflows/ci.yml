@@ -137,6 +137,27 @@ jobs:
       - name: Get current Dev task definition
         id: dev-task
         run: |
+          echo "Cluster: $ECS_CLUSTER"
+          echo "Service: $ECS_DEV_SERVICE"
+          echo "Region: $AWS_REGION"
+
+          echo "----- ECS SERVICES -----"
+
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_DEV_SERVICE" \
+            --query '{
+              Services: services[].{
+                Name: serviceName,
+                Status: status,
+                Desired: desiredCount,
+                Running: runningCount,
+                TaskDefinition: taskDefinition
+              },
+              Failures: failures
+            }' \
+            --output json
+
           TASK_DEFINITION=$(aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
             --services "$ECS_DEV_SERVICE" \
@@ -147,7 +168,8 @@ jobs:
           echo "$TASK_DEFINITION"
 
           if [ -z "$TASK_DEFINITION" ] || [ "$TASK_DEFINITION" = "None" ]; then
-            echo "ERROR: Could not find the task definition for $ECS_DEV_SERVICE"
+            echo "ERROR: ECS did not return a task definition for $ECS_DEV_SERVICE"
+            echo "Check the cluster and service names above."
             exit 1
           fi
 
