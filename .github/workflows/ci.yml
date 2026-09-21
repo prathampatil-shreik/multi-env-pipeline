@@ -13,22 +13,24 @@ env:
   ECR_REPOSITORY: taskflow
   ECS_CLUSTER: taskflow-multi-env
   ECS_DEV_SERVICE: taskflow-service-2tpd33cg
+  ECS_STAGING_SERVICE: taskflow-service-9xd5md0r
 
 jobs:
-  build-and-deploy-dev:
-    name: Build, Push and Deploy to Dev
+  build-and-deploy:
+    name: Build, Dev and Staging
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------------------
-      # 1. Checkout source code
-      # ---------------------------------------------------------
+
+      # =========================================================
+      # 1. CHECKOUT
+      # =========================================================
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # 2. Set up Java
-      # ---------------------------------------------------------
+      # =========================================================
+      # 2. JAVA
+      # =========================================================
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -36,15 +38,15 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      # ---------------------------------------------------------
-      # 3. Build application JAR
-      # ---------------------------------------------------------
+      # =========================================================
+      # 3. BUILD JAR ONCE
+      # =========================================================
       - name: Build JAR
         run: mvn clean package -DskipTests
 
-      # ---------------------------------------------------------
-      # 4. Configure AWS credentials
-      # ---------------------------------------------------------
+      # =========================================================
+      # 4. AWS CREDENTIALS
+      # =========================================================
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -52,112 +54,59 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ---------------------------------------------------------
-      # 5. Login to Amazon ECR
-      # ---------------------------------------------------------
+      # =========================================================
+      # 5. ECR LOGIN
+      # =========================================================
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ---------------------------------------------------------
-      # 6. Set image information for later steps
-      # ---------------------------------------------------------
+      # =========================================================
+      # 6. SET IMAGE INFORMATION
+      # =========================================================
       - name: Set image information
         run: |
           echo "ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
 
-          echo "ECR Registry:"
-          echo "${{ steps.login-ecr.outputs.registry }}"
+          echo "Release image:"
+          echo "${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${GITHUB_SHA}"
 
-          echo "Image Tag:"
-          echo "${GITHUB_SHA}"
-
-      # ---------------------------------------------------------
-      # 7. Build Docker image ONCE
-      # ---------------------------------------------------------
+      # =========================================================
+      # 7. BUILD DOCKER IMAGE ONCE
+      # =========================================================
       - name: Build Docker image
         run: |
           docker build \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             .
 
-      # ---------------------------------------------------------
-      # 8. Push the SAME image to ECR
-      # ---------------------------------------------------------
+      # =========================================================
+      # 8. PUSH IMAGE ONCE
+      # =========================================================
       - name: Push Docker image to ECR
         run: |
           docker push \
             $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-      # ---------------------------------------------------------
-      # 9. Show immutable artifact
-      # ---------------------------------------------------------
-      - name: Show image information
+      # =========================================================
+      # 9. SHOW ARTIFACT
+      # =========================================================
+      - name: Show release artifact
         run: |
           echo "========================================"
           echo "TaskFlow Release Artifact"
           echo "========================================"
-          echo "Repository: $ECR_REPOSITORY"
-          echo "Image Tag:  $IMAGE_TAG"
           echo "Image:"
           echo "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           echo "========================================"
 
-      # ---------------------------------------------------------
-      # 10. Diagnose Dev ECS service
-      # ---------------------------------------------------------
-      - name: Debug Dev ECS service
-        run: |
-          echo "AWS Region:"
-          echo "$AWS_DEFAULT_REGION"
-
-          echo "ECS Cluster:"
-          aws ecs describe-clusters \
-            --clusters "$ECS_CLUSTER" \
-            --query 'clusters[].{Name:clusterName,Status:status,ARN:clusterArn}' \
-            --output table
-
-          echo "ECS Services:"
-          aws ecs list-services \
-            --cluster "$ECS_CLUSTER" \
-            --query 'serviceArns[]' \
-            --output table
-
-          echo "Dev Service:"
-          aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_DEV_SERVICE" \
-            --query 'services[].{Name:serviceName,Status:status,Desired:desiredCount,Running:runningCount,TaskDefinition:taskDefinition}' \
-            --output table
-
-      # ---------------------------------------------------------
-      # 11. Get current Dev task definition
-      # ---------------------------------------------------------
+      # =========================================================
+      # 10. GET CURRENT DEV TASK DEFINITION
+      # =========================================================
       - name: Get current Dev task definition
         id: dev-task
         run: |
-          echo "Cluster: $ECS_CLUSTER"
-          echo "Service: $ECS_DEV_SERVICE"
-          echo "Region: $AWS_REGION"
-
-          echo "----- ECS SERVICES -----"
-
-          aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_DEV_SERVICE" \
-            --query '{
-              Services: services[].{
-                Name: serviceName,
-                Status: status,
-                Desired: desiredCount,
-                Running: runningCount,
-                TaskDefinition: taskDefinition
-              },
-              Failures: failures
-            }' \
-            --output json
-
           TASK_DEFINITION=$(aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
             --services "$ECS_DEV_SERVICE" \
@@ -168,17 +117,15 @@ jobs:
           echo "$TASK_DEFINITION"
 
           if [ -z "$TASK_DEFINITION" ] || [ "$TASK_DEFINITION" = "None" ]; then
-            echo "ERROR: ECS did not return a task definition for $ECS_DEV_SERVICE"
-            echo "Check the cluster and service names above."
+            echo "ERROR: Dev task definition not found"
             exit 1
           fi
 
           echo "task_definition=$TASK_DEFINITION" >> "$GITHUB_OUTPUT"
 
-      # ---------------------------------------------------------
-      # 11. Create new Dev task definition
-      #     Change ONLY the Docker image
-      # ---------------------------------------------------------
+      # =========================================================
+      # 11. CREATE DEV TASK DEFINITION
+      # =========================================================
       - name: Create Dev task definition
         run: |
           aws ecs describe-task-definition \
@@ -206,12 +153,9 @@ jobs:
               )
           ' task-definition.json > dev-task-definition.json
 
-          echo "New Dev image:"
-          jq -r '.containerDefinitions[] | select(.name == "taskflow") | .image' dev-task-definition.json
-
-      # ---------------------------------------------------------
-      # 12. Register new ECS task definition revision
-      # ---------------------------------------------------------
+      # =========================================================
+      # 12. REGISTER DEV TASK DEFINITION
+      # =========================================================
       - name: Register Dev task definition
         id: register-dev
         run: |
@@ -220,14 +164,14 @@ jobs:
             --query 'taskDefinition.taskDefinitionArn' \
             --output text)
 
-          echo "New Dev task definition:"
+          echo "Dev task definition:"
           echo "$DEV_TASK_DEFINITION"
 
           echo "task_definition=$DEV_TASK_DEFINITION" >> "$GITHUB_OUTPUT"
 
-      # ---------------------------------------------------------
-      # 13. Deploy same artifact to Dev
-      # ---------------------------------------------------------
+      # =========================================================
+      # 13. DEPLOY DEV
+      # =========================================================
       - name: Deploy to Dev
         run: |
           aws ecs update-service \
@@ -236,18 +180,18 @@ jobs:
             --task-definition "${{ steps.register-dev.outputs.task_definition }}" \
             --force-new-deployment
 
-      # ---------------------------------------------------------
-      # 14. Wait until Dev deployment is stable
-      # ---------------------------------------------------------
+      # =========================================================
+      # 14. WAIT FOR DEV
+      # =========================================================
       - name: Wait for Dev deployment
         run: |
           aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
             --services "$ECS_DEV_SERVICE"
 
-      # ---------------------------------------------------------
-      # 15. Verify Dev service
-      # ---------------------------------------------------------
+      # =========================================================
+      # 15. VERIFY DEV
+      # =========================================================
       - name: Verify Dev service
         run: |
           aws ecs describe-services \
@@ -256,10 +200,10 @@ jobs:
             --query 'services[0].{Service:serviceName,Desired:desiredCount,Running:runningCount,TaskDefinition:taskDefinition}' \
             --output table
 
-      # ---------------------------------------------------------
-      # 16. Verify deployed image
-      # ---------------------------------------------------------
-      - name: Verify deployed image
+      # =========================================================
+      # 16. VERIFY DEV IMAGE
+      # =========================================================
+      - name: Verify Dev image
         run: |
           RUNNING_TASK=$(aws ecs list-tasks \
             --cluster "$ECS_CLUSTER" \
@@ -268,11 +212,166 @@ jobs:
             --query 'taskArns[0]' \
             --output text)
 
-          echo "Running Dev task:"
-          echo "$RUNNING_TASK"
-
           aws ecs describe-tasks \
             --cluster "$ECS_CLUSTER" \
             --tasks "$RUNNING_TASK" \
             --query 'tasks[0].containers[?name==`taskflow`].image' \
             --output text
+
+      # =========================================================
+      # 17. GET CURRENT STAGING TASK DEFINITION
+      # =========================================================
+      - name: Get current Staging task definition
+        id: staging-task
+        run: |
+          TASK_DEFINITION=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_STAGING_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          echo "Current Staging task definition:"
+          echo "$TASK_DEFINITION"
+
+          if [ -z "$TASK_DEFINITION" ] || [ "$TASK_DEFINITION" = "None" ]; then
+            echo "ERROR: Staging task definition not found"
+            exit 1
+          fi
+
+          echo "task_definition=$TASK_DEFINITION" >> "$GITHUB_OUTPUT"
+
+      # =========================================================
+      # 18. CREATE STAGING TASK DEFINITION
+      #     ONLY IMAGE CHANGES
+      # =========================================================
+      - name: Create Staging task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${{ steps.staging-task.outputs.task_definition }}" \
+            --query 'taskDefinition' \
+            --output json > staging-task-definition.json
+
+          jq --arg IMAGE "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" '
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            |
+            .containerDefinitions |=
+              map(
+                if .name == "taskflow"
+                then .image = $IMAGE
+                else .
+                end
+              )
+          ' staging-task-definition.json > new-staging-task-definition.json
+
+      # =========================================================
+      # 19. REGISTER STAGING TASK DEFINITION
+      # =========================================================
+      - name: Register Staging task definition
+        id: register-staging
+        run: |
+          STAGING_TASK_DEFINITION=$(aws ecs register-task-definition \
+            --cli-input-json file://new-staging-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "Staging task definition:"
+          echo "$STAGING_TASK_DEFINITION"
+
+          echo "task_definition=$STAGING_TASK_DEFINITION" >> "$GITHUB_OUTPUT"
+
+      # =========================================================
+      # 20. PROMOTE SAME IMAGE TO STAGING
+      # =========================================================
+      - name: Promote to Staging
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_STAGING_SERVICE" \
+            --task-definition "${{ steps.register-staging.outputs.task_definition }}" \
+            --force-new-deployment
+
+      # =========================================================
+      # 21. WAIT FOR STAGING
+      # =========================================================
+      - name: Wait for Staging deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_STAGING_SERVICE"
+
+      # =========================================================
+      # 22. VERIFY STAGING SERVICE
+      # =========================================================
+      - name: Verify Staging service
+        run: |
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_STAGING_SERVICE" \
+            --query 'services[0].{Service:serviceName,Desired:desiredCount,Running:runningCount,TaskDefinition:taskDefinition}' \
+            --output table
+
+      # =========================================================
+      # 23. VERIFY STAGING IMAGE
+      # =========================================================
+      - name: Verify Staging image
+        run: |
+          RUNNING_TASK=$(aws ecs list-tasks \
+            --cluster "$ECS_CLUSTER" \
+            --service-name "$ECS_STAGING_SERVICE" \
+            --desired-status RUNNING \
+            --query 'taskArns[0]' \
+            --output text)
+
+          STAGING_IMAGE=$(aws ecs describe-tasks \
+            --cluster "$ECS_CLUSTER" \
+            --tasks "$RUNNING_TASK" \
+            --query 'tasks[0].containers[?name==`taskflow`].image' \
+            --output text)
+
+          echo "Staging image:"
+          echo "$STAGING_IMAGE"
+
+          EXPECTED_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          if [ "$STAGING_IMAGE" != "$EXPECTED_IMAGE" ]; then
+            echo "ERROR: Staging image does not match the release artifact"
+            echo "Expected: $EXPECTED_IMAGE"
+            echo "Actual:   $STAGING_IMAGE"
+            exit 1
+          fi
+
+          echo "PASS: Staging is using the exact same image."
+
+      # =========================================================
+      # 24. STAGING HEALTH GATE
+      # =========================================================
+      - name: Staging health gate
+        run: |
+          echo "Checking Staging health endpoint..."
+
+          STATUS=$(curl -s -o /tmp/staging-health.json \
+            -w "%{http_code}" \
+            "http://${{ secrets.TASKFLOW_ALB_DNS }}:8080/health")
+
+          echo "HTTP status: $STATUS"
+          cat /tmp/staging-health.json
+
+          if [ "$STATUS" != "200" ]; then
+            echo "FAIL: Staging health check failed"
+            exit 1
+          fi
+
+          if ! grep -q '"status":"UP"' /tmp/staging-health.json; then
+            echo "FAIL: Staging application is not reporting UP"
+            exit 1
+          fi
+
+          echo "PASS: Staging health gate passed."
