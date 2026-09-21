@@ -12,7 +12,7 @@ env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: taskflow
   ECS_CLUSTER: taskflow-multi-env
-  ECS_DEV_SERVICE: taskflow-dev
+  ECS_DEV_SERVICE: taskflow-service-2tpd33cg
 
 jobs:
   build-and-deploy-dev:
